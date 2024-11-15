@@ -1,7 +1,6 @@
 export * from './zk'
 export * from './snarkjs/operator'
 export * from './gnark/operator'
-export * from './expander/operator'
 export * from './types'
 export * from './utils'
 export * from './config'

@@ -1,14 +1,8 @@
-import PQueue from 'p-queue'
 import { CircuitWasm, Logger, MakeZKOperatorOpts, VerificationKey, ZKOperator } from '../types'
-import { serialiseValuesToBits } from '../utils'
 
 type WitnessData = {
 	type: 'mem'
 	data?: Uint8Array
-}
-
-type SnarkJSOpts = {
-	maxProofConcurrency?: number
 }
 
 // 5 pages is enough for the witness data
@@ -38,20 +32,17 @@ const WITNESS_MEMORY_SIZE_PAGES = 5
  */
 export function makeSnarkJsZKOperator({
 	algorithm,
-	fetcher,
-	options: { maxProofConcurrency = 2 } = {}
-}: MakeZKOperatorOpts<SnarkJSOpts>): ZKOperator {
+	fetcher
+}: MakeZKOperatorOpts<{}>): ZKOperator {
+	// require here to avoid loading snarkjs in
+	// any unsupported environments
+	const snarkjs = require('snarkjs')
 	let zkey: Promise<VerificationKey> | VerificationKey | undefined
 	let circuitWasm: Promise<CircuitWasm> | CircuitWasm | undefined
 	let wc: Promise<unknown> | undefined
 
-	const snarkjs = loadSnarkjs()
-
-	const concurrencyLimiter = new PQueue({ concurrency: maxProofConcurrency })
-
 	return {
-		// eslint-disable-next-line @typescript-eslint/no-unused-vars
-		async generateWitness({ out, ...input }, logger) {
+		async generateWitness(input, logger) {
 			circuitWasm ||= getCircuitWasm()
 			wc ||= (async() => {
 				if(!snarkjs.wtns.getWtnsCalculator) {
@@ -80,23 +71,16 @@ export function makeSnarkJsZKOperator({
 				}
 			})()
 
-			const inputBits = {
-				key: serialiseValuesToBits(algorithm, input.key),
-				nonce: serialiseValuesToBits(algorithm, input.nonce),
-				counter: serialiseValuesToBits(algorithm, input.counter),
-				in: serialiseValuesToBits(algorithm, input.in),
-			}
-
 			const wtns: WitnessData = { type: 'mem' }
 			if(await wc) {
 				await snarkjs.wtns.wtnsCalculateWithCalculator(
-					inputBits,
+					input,
 					await wc,
 					wtns,
 				)
 			} else {
 				await snarkjs.wtns.calculate(
-					inputBits,
+					input,
 					await circuitWasm,
 					wtns,
 				)
@@ -107,21 +91,13 @@ export function makeSnarkJsZKOperator({
 		async groth16Prove(witness, logger) {
 			zkey ||= getZkey()
 			const { data } = await zkey
-
-			const { proof } = await concurrencyLimiter.add(() => (
-				snarkjs.groth16.prove(
-					data,
-					witness,
-					logger
-				)
-			))
-			return { proof: JSON.stringify(proof) }
+			return snarkjs.groth16.prove(
+				data,
+				witness,
+				logger
+			)
 		},
 		async groth16Verify(publicSignals, proof, logger) {
-			if(typeof proof !== 'string') {
-				throw new Error('Proof must be a string')
-			}
-
 			zkey ||= getZkey()
 			const zkeyResult = await zkey
 			if(!zkeyResult.json) {
@@ -131,14 +107,8 @@ export function makeSnarkJsZKOperator({
 
 			return snarkjs.groth16.verify(
 				zkeyResult.json,
-				serialiseValuesToBits(
-					algorithm,
-					publicSignals.out,
-					publicSignals.nonce,
-					publicSignals.counter,
-					publicSignals.in
-				),
-				JSON.parse(proof),
+				publicSignals,
+				proof,
 				logger
 			)
 		},
@@ -158,8 +128,4 @@ export function makeSnarkJsZKOperator({
 			.fetch('snarkjs', `${algorithm}/circuit_final.zkey`, logger)
 		return { data }
 	}
-}
-
-function loadSnarkjs() {
-	return require('snarkjs')
 }

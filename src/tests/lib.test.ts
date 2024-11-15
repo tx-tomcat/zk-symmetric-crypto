@@ -3,29 +3,25 @@ import {
 	CONFIG,
 	EncryptionAlgorithm,
 	generateProof,
+	makeGnarkZkOperator,
+	makeLocalFileFetch,
+	makeSnarkJsZKOperator,
 	PrivateInput,
 	verifyProof,
 	ZKEngine,
 	ZKOperator,
 } from '../index'
-import { encryptData, getEngineForConfigItem, ZK_CONFIG_MAP, ZK_CONFIGS } from './utils'
+import { encryptData } from './utils'
 
 jest.setTimeout(20_000)
 
-// TODO: add back AES tests
 const ALL_ALGOS: EncryptionAlgorithm[] = [
 	'chacha20',
 	'aes-256-ctr',
 	'aes-128-ctr',
 ]
 
-const SUPPORTED_ALGO_MAP: { [T in ZKEngine]: EncryptionAlgorithm[] } = {
-	'expander': ['chacha20'],
-	'gnark': ALL_ALGOS,
-	'snarkjs': ALL_ALGOS,
-}
-
-const ALG_TEST_CONFIG: { [E in EncryptionAlgorithm] } = {
+const ALG_TEST_CONFIG = {
 	'chacha20': {
 		encLength: 45,
 	},
@@ -37,11 +33,26 @@ const ALG_TEST_CONFIG: { [E in EncryptionAlgorithm] } = {
 	},
 }
 
-describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
+const fetcher = makeLocalFileFetch()
 
-	const ALGOS = SUPPORTED_ALGO_MAP[getEngineForConfigItem(zkEngine)]
-	describe.each(ALGOS)('%s Lib Tests', (algorithm) => {
-		const { encLength } = ALG_TEST_CONFIG[algorithm]
+const ALL_ZK_ENGINES: {
+	[E in ZKEngine]: (algorithm: EncryptionAlgorithm) => ZKOperator
+} = {
+	'snarkjs': (algorithm) => (
+		makeSnarkJsZKOperator({ algorithm, fetcher })
+	),
+	'gnark': (algorithm) => (
+		makeGnarkZkOperator({ algorithm, fetcher })
+	),
+}
+
+const ZK_ENGINES = Object.keys(ALL_ZK_ENGINES) as ZKEngine[]
+
+describe.each(ALL_ALGOS)('%s Lib Tests', (algorithm) => {
+	describe.each(ZK_ENGINES)('%s engine', (zkEngine) => {
+		const {
+			encLength,
+		} = ALG_TEST_CONFIG[algorithm]
 		const {
 			bitsPerWord,
 			chunkSize,
@@ -52,11 +63,7 @@ describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
 
 		let operator: ZKOperator
 		beforeAll(async() => {
-			operator = await ZK_CONFIG_MAP[zkEngine](algorithm)
-		})
-
-		afterEach(async() => {
-			await operator.release?.()
+			operator = await ALL_ZK_ENGINES[zkEngine](algorithm)
 		})
 
 		it('should verify encrypted data', async() => {
@@ -76,12 +83,20 @@ describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
 			)
 			const publicInput = { ciphertext, iv: iv, offset: 0 }
 
+
 			const proof = await generateProof({
 				algorithm,
 				privateInput,
 				publicInput,
 				operator
 			})
+			// ensure the ZK decrypted data matches the plaintext
+			expect(
+				proof.plaintext
+					.slice(0, plaintext.length)
+			).toEqual(
+				plaintext
+			)
 			// client will send proof to witness
 			// witness would verify proof
 			await verifyProof({ proof, publicInput, operator })
@@ -91,6 +106,8 @@ describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
 			const totalPlaintext = new Uint8Array(randomBytes(chunkSizeBytes * 5))
 			// use a chunk in the middle
 			const offset = 2
+			const plaintext = totalPlaintext
+				.subarray(chunkSizeBytes * offset, chunkSizeBytes * (offset + 1))
 
 			const iv = Buffer.alloc(12, 3)
 			const privateInput: PrivateInput = {
@@ -113,8 +130,13 @@ describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
 				publicInput,
 				operator
 			})
-
-			await verifyProof({ proof, publicInput, operator })
+			// ensure the ZK decrypted data matches the plaintext
+			expect(
+				proof.plaintext
+					.slice(0, plaintext.length)
+			).toEqual(
+				plaintext
+			)
 		})
 
 		it('should fail to verify incorrect data', async() => {
@@ -123,6 +145,7 @@ describe.each(ZK_CONFIGS)('%s Engine Tests', (zkEngine) => {
 			const privateInput: PrivateInput = {
 				key: Buffer.alloc(keySizeBytes, 2),
 			}
+
 
 			const iv = Buffer.alloc(12, 3)
 			const ciphertext = encryptData(

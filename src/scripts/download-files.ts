@@ -2,6 +2,7 @@ import { exec } from "child_process";
 import { rename, rm } from "fs/promises";
 import { join } from "path";
 import { promisify } from "util";
+import { GIT_COMMIT_HASH } from "../config";
 import { Logger } from "../types";
 
 const execPromise = promisify(exec);
@@ -10,7 +11,7 @@ const logger: Logger = console;
 
 const CLONE_DIR = "./zk-symmetric-crypto";
 const CLONE_CMD = [
-  `git clone https://github.com/tx-tomcat/zk-symmetric-crypto ${CLONE_DIR}`,
+  `git clone https://github.com/reclaimprotocol/zk-symmetric-crypto ${CLONE_DIR}`,
   `cd ${CLONE_DIR}`,
 ].join(" && ");
 
@@ -27,7 +28,7 @@ async function main() {
   await rm(CLONE_DIR, { recursive: true, force: true });
   logger.info(`removed old cloned "${CLONE_DIR}" directory`);
 
-  logger.info(`cloning repo, This may take a while...`);
+  logger.info(`cloning repo, . This may take a while...`);
 
   await execPromise(CLONE_CMD);
   logger.info(`cloned repo to "${CLONE_DIR}"`);

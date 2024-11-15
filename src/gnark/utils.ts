@@ -1,21 +1,26 @@
 import { Base64 } from 'js-base64'
-import { EncryptionAlgorithm, FileFetch, Logger, ZKProofInput, ZKProofInputOPRF, ZKProofPublicSignals, ZKProofPublicSignalsOPRF, ZKTOPRFResponsePublicSignals } from '../types'
+import { CONFIG } from '../config'
+import { EncryptionAlgorithm } from '../types'
 
 const BIN_PATH = '../../bin/gnark'
-
-let globalGnarkLib: ReturnType<typeof loadGnarkLib> | undefined
 
 export type GnarkLib = {
 	verify: Function
 	free: Function
-	vfree: Function
 	prove: Function
 	initAlgorithm: Function
-	generateThresholdKeys: Function
-	oprfEvaluate: Function
-	generateOPRFRequest: Function
-	toprfFinalize: Function
 	koffi: typeof import('koffi')
+}
+
+export const ALGS_MAP: {
+	[key in EncryptionAlgorithm]: {
+		id: number
+		ext: string
+	}
+} = {
+	'chacha20': { id: 0, ext: 'chacha20' },
+	'aes-128-ctr': { id: 1, ext: 'aes128' },
+	'aes-256-ctr': { id: 2, ext: 'aes256' },
 }
 
 // golang uses different arch names
@@ -24,17 +29,15 @@ const ARCH_MAP = {
 	'x64': 'x86_64',
 }
 
-const INIT_ALGS: { [key: number]: boolean } = {}
-
-async function loadGnarkLib(): Promise<GnarkLib> {
-	const koffiMod = await import('koffi')
+export async function loadGnarkLib(): Promise<GnarkLib> {
+	const koffi = await import('koffi')
 		.catch(() => undefined)
-	if(!koffiMod) {
+	if(!koffi) {
 		throw new Error('Koffi not available, cannot use gnark')
 	}
 
 	const { join } = await import('path')
-	const { default: koffi } = koffiMod
+
 	koffi.reset() //otherwise tests will fail
 
 	// define object GoSlice to map to:
@@ -46,11 +49,6 @@ async function loadGnarkLib(): Promise<GnarkLib> {
 	})
 
 	const ProveReturn = koffi.struct('ProveReturn', {
-		r0: 'void *',
-		r1:  'longlong',
-	})
-
-	const LibReturn = koffi.struct('LibReturn', {
 		r0: 'void *',
 		r1:  'longlong',
 	})
@@ -75,16 +73,11 @@ async function loadGnarkLib(): Promise<GnarkLib> {
 		return {
 			verify: libVerify.func('Verify', 'unsigned char', [GoSlice]),
 			free: libProve.func('Free', 'void', ['void *']),
-			vfree: libVerify.func('VFree', 'void', ['void *']), //free in verify library
 			prove: libProve.func('Prove', ProveReturn, [GoSlice]),
 			initAlgorithm: libProve.func(
 				'InitAlgorithm', 'unsigned char',
 				['unsigned char', GoSlice, GoSlice]
 			),
-			generateThresholdKeys: libVerify.func('GenerateThresholdKeys', LibReturn, [GoSlice]),
-			oprfEvaluate: libVerify.func('OPRFEvaluate', LibReturn, [GoSlice]),
-			generateOPRFRequest: libProve.func('GenerateOPRFRequestData', LibReturn, [GoSlice]),
-			toprfFinalize: libProve.func('TOPRFFinalize', LibReturn, [GoSlice]),
 			koffi
 		}
 	} catch(err) {
@@ -102,119 +95,32 @@ async function loadGnarkLib(): Promise<GnarkLib> {
 	}
 }
 
-export async function initGnarkAlgorithm(
-	id: number,
-	fileExt: string,
-	fetcher: FileFetch,
-	logger?: Logger
-) {
-	globalGnarkLib ??= loadGnarkLib()
-	const lib = await globalGnarkLib
-	if(INIT_ALGS[id]) {
-		return lib
-	}
-
-	const [pk, r1cs] = await Promise.all([
-		fetcher.fetch('gnark', `pk.${fileExt}`, logger),
-		fetcher.fetch('gnark', `r1cs.${fileExt}`, logger),
-	])
-
-	const f1 = { data: pk, len: pk.length, cap: pk.length }
-	const f2 = { data: r1cs, len: r1cs.length, cap: r1cs.length }
-
-	await lib.initAlgorithm(id, f1, f2)
-
-	INIT_ALGS[id] = true
-
-	return lib
-}
-
 export function strToUint8Array(str: string) {
 	return new TextEncoder().encode(str)
 }
 
-export function serialiseGnarkWitness(
-	cipher: EncryptionAlgorithm,
-	input: ZKProofInput | ZKProofInputOPRF | ZKProofPublicSignals | ZKProofPublicSignalsOPRF
-) {
-	const json = generateGnarkWitness(cipher, input)
-	return strToUint8Array(JSON.stringify(
-		json
-	))
-}
+export
+function generateGnarkWitness(cipher: EncryptionAlgorithm, input) {
+	const {
+		bitsToUint8Array,
+		isLittleEndian
+	} = CONFIG[cipher]
 
-export function generateGnarkWitness(
-	cipher: EncryptionAlgorithm,
-	input: ZKProofInput | ZKProofInputOPRF
-		| ZKProofPublicSignals | ZKProofPublicSignalsOPRF
-) {
 	//input is bits, we convert them back to bytes
-	return {
-		cipher: cipher + ('toprf' in input ? '-toprf' : ''),
-		key: 'key' in input
-			? Base64.fromUint8Array(input.key)
-			: undefined,
-		nonce: Base64.fromUint8Array(input.nonce),
-		counter: input.counter,
-		input: Base64.fromUint8Array(input.in),
-		toprf: generateTOPRFParams()
+	const proofParams = {
+		cipher:cipher,
+		key: Base64.fromUint8Array(bitsToUint8Array(input.key.flat())),
+		nonce: Base64.fromUint8Array(bitsToUint8Array(input.nonce.flat())),
+		counter: deSerialiseCounter(),
+		input: Base64.fromUint8Array(bitsToUint8Array(input.in.flat())),
 	}
 
-	function generateTOPRFParams() {
-		if(!('toprf' in input)) {
-			return {}
-		}
+	const paramsJson = JSON.stringify(proofParams)
+	return strToUint8Array(paramsJson)
 
-		const { pos, len, domainSeparator, output, responses } = input.toprf
-		return {
-			pos: pos,
-			len: len,
-			domainSeparator: Base64
-				.fromUint8Array(strToUint8Array(domainSeparator)),
-			output: Base64.fromUint8Array(output),
-			responses: responses.map(mapResponse),
-			mask: 'mask' in input
-				? Base64.fromUint8Array(input.mask)
-				: ''
-		}
+	function deSerialiseCounter() {
+		const bytes = bitsToUint8Array(input.counter)
+		const counterView = new DataView(bytes.buffer)
+		return counterView.getUint32(0, isLittleEndian)
 	}
-}
-
-function mapResponse({
-	index, publicKeyShare, evaluated, c, r
-}: ZKTOPRFResponsePublicSignals) {
-	return {
-		index,
-		publicKeyShare: Base64.fromUint8Array(publicKeyShare),
-		evaluated: Base64.fromUint8Array(evaluated),
-		c: Base64.fromUint8Array(c),
-		r: Base64.fromUint8Array(r),
-	}
-}
-
-export function executeGnarkFn(
-	fn: Function,
-	jsonInput: string | Uint8Array
-) {
-	const wtns = {
-		data: typeof jsonInput === 'string'
-			? Buffer.from(jsonInput)
-			: jsonInput,
-		len: jsonInput.length,
-		cap: jsonInput.length
-	}
-	return fn(wtns)
-}
-
-export async function executeGnarkFnAndGetJson(
-	fn: Function,
-	jsonInput: string | Uint8Array
-) {
-	const { free, koffi } = await globalGnarkLib!
-	const res = executeGnarkFn(fn, jsonInput)
-	const proofJson = Buffer.from(
-		koffi.decode(res.r0, 'unsigned char', res.r1)
-	).toString()
-	free(res.r0) // Avoid memory leak!
-	return JSON.parse(proofJson)
 }
